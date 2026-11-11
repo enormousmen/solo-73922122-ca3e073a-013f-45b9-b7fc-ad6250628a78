@@ -1,31 +1,43 @@
-"""FastAPI web entry point for the offline mTLS chain doctor."""
+"""FastAPI web entry point: mTLS chain doctor and the JWT verifier page."""
 
 from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from .config import settings
 from .diagnostics import (
     ALLOWED_SIGNATURE_LABEL,
     DiagnosticInputError,
     diagnose,
     parse_pem_bundle,
 )
+from .jwks import JwksCache
+from .verifier import verify_token
 
 BASE_DIR = Path(__file__).resolve().parent
 EXAMPLES_DIR = BASE_DIR / "examples"
 
 app = FastAPI(
-    title="mTLS 证书链离线诊断",
-    description="内网 mTLS 客户端证书链排障：区分中间证书缺失与交叉签发选链错误",
+    title="mTLS 证书链离线诊断 / JWT 签名核验",
+    description="内网运维工具：证书链排障 + 固定配置的 RS256 JWT 核验",
 )
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+
+# One process-wide JWKS cache: single flight + throttling live inside it.
+jwks_cache = JwksCache(
+    settings.jwks_url,
+    ttl_seconds=settings.cache_ttl,
+    min_interval=settings.refresh_min_interval,
+    timeout_seconds=settings.fetch_timeout,
+)
 
 
 def _read_upload(f: UploadFile | None) -> bytes:
@@ -158,3 +170,141 @@ def example_payload(name: str):
     for pem in sorted(directory.glob("*.pem")):
         payload["files"][pem.name] = pem.read_text(encoding="utf-8")
     return JSONResponse(payload)
+
+
+# ---------------------------------------------------------------------------
+# JWT verification (fixed issuer / audience / JWKS URL from start-up config)
+# ---------------------------------------------------------------------------
+
+_STATUS_LABELS = {
+    "valid": "核验通过",
+    "invalid": "令牌无效",
+    "unknown": "暂时无法核验",
+}
+
+
+def _verify_page_context(result=None, token: str = "") -> dict:
+    snap = jwks_cache.snapshot()
+    return {
+        "settings": settings,
+        "snap": snap,
+        "result": result,
+        "status_label": _STATUS_LABELS.get(result.status) if result else None,
+        "token_text": token,
+        "has_mock": settings.mock_base is not None,
+    }
+
+
+@app.get("/verify", response_class=HTMLResponse)
+def verify_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request, "verify.html", _verify_page_context()
+    )
+
+
+@app.post("/verify", response_class=HTMLResponse)
+async def verify_html(request: Request, token: str = Form(default="")):
+    result = await verify_token(
+        token, jwks_cache, settings.issuer, settings.audience
+    )
+    status_code = 200 if result.status == "valid" else (
+        400 if result.status == "invalid" else 503
+    )
+    return templates.TemplateResponse(
+        request,
+        "verify.html",
+        _verify_page_context(result, token),
+        status_code=status_code,
+    )
+
+
+@app.post("/api/verify")
+async def verify_api(request: Request):
+    # Accept any body gracefully: malformed/non-JSON input is a token-side
+    # rejection (400 invalid), never a framework-level 422.
+    try:
+        payload = await request.json()
+    except ValueError:
+        payload = None
+    token = ""
+    if isinstance(payload, dict):
+        raw = payload.get("token", "")
+        if isinstance(raw, str):
+            token = raw
+    result = await verify_token(
+        token, jwks_cache, settings.issuer, settings.audience
+    )
+    status_code = 200 if result.status == "valid" else (
+        400 if result.status == "invalid" else 503
+    )
+    return JSONResponse(result.to_dict(), status_code=status_code)
+
+
+@app.get("/api/jwks/cache")
+def jwks_cache_state():
+    """Read-only diagnostic view of cache freshness and throttling."""
+    snap = jwks_cache.snapshot()
+    return {
+        "jwks_url": settings.jwks_url,
+        "has_cache": snap.has_cache,
+        "fresh": snap.fresh,
+        "cached_kids": snap.kids,
+        "age_seconds": None if snap.age is None else round(snap.age, 2),
+        "ttl_seconds": settings.cache_ttl,
+        "expires_in": (
+            None
+            if snap.expires_at is None
+            else round(max(0.0, snap.expires_at - snap.now), 2)
+        ),
+        "fetch_count": snap.fetch_count,
+        "suppressed_refreshes": snap.suppressed_refreshes,
+        "last_refresh_error": snap.last_refresh_error,
+        "min_interval_seconds": settings.refresh_min_interval,
+        "timeout_seconds": settings.fetch_timeout,
+    }
+
+
+# ----- demo JWKS source proxy (browser only talks to this origin) ----------
+
+async def _proxy(method: str, suffix: str, **kwargs):
+    if settings.mock_base is None:
+        return JSONResponse({"error": "未配置本地 JWKS 演示源"}, status_code=404)
+    url = settings.mock_base.rstrip("/") + suffix
+    try:
+        async with httpx.AsyncClient(timeout=settings.fetch_timeout + 1) as client:
+            resp = await client.request(method, url, **kwargs)
+    except httpx.HTTPError as exc:
+        return JSONResponse(
+            {"error": f"演示源不可达：{exc.__class__.__name__}"}, status_code=502
+        )
+    return JSONResponse(resp.json(), status_code=resp.status_code)
+
+
+@app.get("/demo/state")
+async def demo_state():
+    return await _proxy("GET", "/__admin/state")
+
+
+@app.post("/demo/keyset/{name}")
+async def demo_keyset(name: str):
+    return await _proxy("POST", f"/__admin/keyset/{name}")
+
+
+@app.post("/demo/mode/{mode}")
+async def demo_mode(mode: str):
+    return await _proxy("POST", f"/__admin/mode?mode={mode}")
+
+
+@app.post("/demo/reset")
+async def demo_reset():
+    return await _proxy("POST", "/__admin/reset")
+
+
+@app.get("/demo/tokens")
+async def demo_token_list():
+    return await _proxy("GET", "/tokens")
+
+
+@app.get("/demo/tokens/{scenario}")
+async def demo_token(scenario: str):
+    return await _proxy("GET", f"/tokens/{scenario}")

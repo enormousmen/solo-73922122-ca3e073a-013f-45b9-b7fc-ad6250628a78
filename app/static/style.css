@@ -120,3 +120,20 @@ pre {
   font-size: 11.5px;
   max-height: 480px;
 }
+/* JWT verifier page */
+.nav-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; }
+.status.status-valid { background: var(--ok-bg); color: var(--ok); }
+.status.status-invalid { background: var(--bad-bg); color: var(--bad); }
+.status.status-unknown { background: var(--warn-bg); color: #92400e; }
+.reason-code {
+  font-size: 12px; background: #f1f5f9; padding: 2px 8px; border-radius: 6px;
+}
+.reason-text { font-size: 14px; margin: 10px 0 6px; }
+.result-card { border-left-width: 4px; border-left-style: solid; }
+.result-valid { border-left-color: var(--ok); }
+.result-invalid { border-left-color: var(--bad); }
+.result-unknown { border-left-color: #f59e0b; }
+.demo-block { margin: 14px 0; }
+.demo-block strong { display: block; font-size: 13.5px; margin-bottom: 8px; }
+textarea { resize: vertical; }
+

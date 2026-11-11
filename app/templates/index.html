@@ -13,6 +13,11 @@
 </header>
 
 <main>
+  <div class="nav-row">
+    <a class="btn primary" href="/verify">JWT 签名核验（新）→</a>
+    <span class="hint" style="align-self:center">登录服务更换签名公钥后，用它区分令牌错误与密钥源故障</span>
+  </div>
+
   {% if error %}
   <div class="banner error"><strong>输入错误：</strong>{{ error }}</div>
   {% endif %}

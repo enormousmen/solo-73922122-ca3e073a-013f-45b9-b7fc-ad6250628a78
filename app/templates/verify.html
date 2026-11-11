@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JWT 签名核验 · 内网登录排障</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>JWT 签名核验</h1>
+  <p class="sub">区分「令牌错误」与「密钥源故障」 · 仅 RS256 + 非空 kid · 密钥地址由启动配置固定，不采信令牌内 jku/jwk</p>
+</header>
+
+<main>
+  <p><a class="btn secondary" href="/">← 返回证书链诊断首页</a></p>
+
+  <section class="card">
+    <h2>固定信任配置（启动时注入，令牌无法覆盖）</h2>
+    <table class="cert-table">
+      <tbody>
+      <tr><th>预期 issuer</th><td><code>{{ settings.issuer }}</code></td></tr>
+      <tr><th>预期 audience</th><td><code>{{ settings.audience }}</code></td></tr>
+      <tr><th>JWKS 地址</th><td><code>{{ settings.jwks_url }}</code></td></tr>
+      <tr><th>缓存 / 节流 / 超时</th>
+          <td>整份 JWKS 成功刷新后有效 {{ settings.cache_ttl|int }} 秒 ·
+              所有 kid 合计每 {{ settings.refresh_min_interval|int }} 秒最多一次请求 ·
+              单次超时 {{ settings.fetch_timeout|int }} 秒</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card" id="cache-card">
+    <h2>JWKS 缓存状态</h2>
+    <div id="cache-state" class="hint">加载中…</div>
+  </section>
+
+  {% if result %}
+  <section class="card result-card result-{{ result.status }}">
+    <h2>
+      核验结论：
+      <span class="status status-{{ result.status }}">{{ status_label }}</span>
+      <code class="reason-code">{{ result.reason_code }}</code>
+    </h2>
+    <p class="reason-text">{{ result.reason }}</p>
+    {% if result.kid %}<p class="hint">令牌 kid：<code>{{ result.kid }}</code></p>{% endif %}
+    {% if result.claims %}
+    <details>
+      <summary>令牌 header 与 claims（仅解析，未据此建立信任）</summary>
+      <p class="hint">header：</p>
+      <pre>{{ result.header | tojson(indent=2) }}</pre>
+      <p class="hint">claims：</p>
+      <pre>{{ result.claims | tojson(indent=2) }}</pre>
+    </details>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  <form action="/verify" method="post" class="card">
+    <h2>粘贴 JWT</h2>
+    <label class="span2" style="display:flex;flex-direction:column;gap:6px;font-size:13px;font-weight:600">
+      紧凑 JWS（header.payload.signature）
+      <textarea name="token" rows="6" required
+        placeholder="eyJhbGciOiJSUzI1NiIsImtpZCI6Ii4uLiJ9.eyJpc3MiOi4uLn0.signature"
+        style="font-family:ui-monospace,monospace;font-size:12px;border:1px solid var(--line);border-radius:8px;padding:10px">{{ token_text }}</textarea>
+    </label>
+    <p class="hint">核验顺序：结构与编码 → alg=RS256 / kid 非空 → 必填 exp 未过期 → iss / aud → 按 kid 取 JWKS 公钥验签。</p>
+    <button type="submit" class="btn primary">核验</button>
+  </form>
+
+  {% if has_mock %}
+  <section class="card" id="demo-card">
+    <h2>本地 JWKS 演示源控制台</h2>
+    <p class="hint">
+      模拟「签名公钥更换」：切到密钥套 B 后，旧令牌签名失效（<strong>令牌无效</strong>），
+      再取新令牌即可通过；模拟源故障时结论为<strong>暂时无法核验</strong>，旧缓存过期后绝不用旧钥放行。
+    </p>
+    <div class="demo-block">
+      <strong>密钥套</strong>
+      <div class="example-row">
+        <button type="button" class="btn secondary demo-btn" data-action="keyset/keyset-a">切换到密钥套 A（初始）</button>
+        <button type="button" class="btn secondary demo-btn" data-action="keyset/keyset-b">切换到密钥套 B（换公钥）</button>
+      </div>
+    </div>
+    <div class="demo-block">
+      <strong>故障注入</strong>
+      <div class="example-row">
+        <button type="button" class="btn secondary demo-btn" data-action="mode/ok">恢复正常</button>
+        <button type="button" class="btn secondary demo-btn" data-action="mode/http500">HTTP 500</button>
+        <button type="button" class="btn secondary demo-btn" data-action="mode/empty-keys">空 keys 数组</button>
+        <button type="button" class="btn secondary demo-btn" data-action="mode/invalid-json">非法 JSON</button>
+        <button type="button" class="btn secondary demo-btn" data-action="mode/duplicate-kid">kid 重复</button>
+        <button type="button" class="btn secondary demo-btn" data-action="mode/timeout">响应超时（&gt;2s）</button>
+      </div>
+    </div>
+    <div class="demo-block">
+      <strong>配套 JWT 示例（点击填入上方输入框）</strong>
+      <div id="token-buttons" class="example-row"><span class="hint">加载中…</span></div>
+    </div>
+    <div class="example-row">
+      <button type="button" class="btn secondary demo-btn" data-action="reset">重置演示源</button>
+      <span id="demo-msg" class="hint"></span>
+    </div>
+  </section>
+  {% endif %}
+</main>
+
+<footer>内网登录排障 · 三态结论：核验通过 / 令牌无效 / 暂时无法核验</footer>
+<script src="/static/verify.js"></script>
+</body>
+</html>

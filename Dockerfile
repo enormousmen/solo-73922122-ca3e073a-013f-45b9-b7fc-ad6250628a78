@@ -7,17 +7,13 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Install dependencies first for better layer caching.
-COPY pyproject.toml ./
-RUN pip install --no-cache-dir \
-    "fastapi>=0.110" \
-    "uvicorn[standard]>=0.29" \
-    "jinja2>=3.1" \
-    "python-multipart>=0.0.9" \
-    "cryptography>=42.0"
+COPY pyproject.toml requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 
-# Runs as an unprivileged user; no outbound network is needed at runtime.
+# Runs as an unprivileged user; the verifier only talks to the mock JWKS
+# container on the compose network (no public outbound traffic needed).
 RUN useradd --create-home --uid 10001 appuser
 USER appuser
 
@@ -26,4 +22,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request,sys; \
 sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/', timeout=4).status==200 else 1)"
 
+# Default command runs the JWT verifier; the compose mock service overrides it.
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
